@@ -86,7 +86,7 @@ $$ \mathbf{p} = \left(\frac{\mathbf{x}\cdot\mathbf{b}}{\mathbf{b}\cdot\mathbf{b}
 - Take the unknown $\lambda$ in [[eq-proj]] and replace it with the value found in [[eq-lambda]].
 :::
 
-:::box plain | What is Equation (6) saying in plain words?
+:::box plain | What is this equation saying in plain words?
 - **Top, $\mathbf{x}\cdot\mathbf{b}$:** how much $\mathbf{x}$ and $\mathbf{b}$ point in the same direction.
 - **Bottom, $\mathbf{b}\cdot\mathbf{b}$:** the length of $\mathbf{b}$ squared. Dividing by it cancels the size of $\mathbf{b}$, because making the reference vector longer must not change the shadow of $\mathbf{x}$.
 - **Whole fraction:** one number, $\lambda$. Multiplying $\mathbf{b}$ by it gives a vector of exactly the shadow's length.
