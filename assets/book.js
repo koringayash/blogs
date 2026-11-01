@@ -1,30 +1,217 @@
-const Book={
- async list(){return (await fetch('chapters.json')).json()},
- math(md){ // protect TeX from the markdown parser
-  const s=[];md=md.replace(/\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$/g,(m,d,i)=>{s.push([!!d,d||i]);return '@@M'+(s.length-1)+'@@'});
-  return [md,s]},
- unmath(html,s){return html.replace(/@@M(\d+)@@/g,(m,i)=>{const [d,t]=s[i];
-  try{return katex.renderToString(t,{displayMode:d,throwOnError:false})}catch(e){return t}}).replace(/<p>(<span class="katex-display">[\s\S]*?<\/span>)<\/p>/g,'<div class="math">$1</div>')},
- figs(md){ // :::figure ID | Title | description   and   :::widget name
-  return md.replace(/^:::figure (.+)$/gm,(m,l)=>{const [id,t,d]=l.split('|').map(x=>x.trim());
-   return `<div class="fig todo"><span class="tag">${id} · PLACEHOLDER</span><b> ${t}</b><br>${d}</div>`})
-  .replace(/^:::widget (\w+)(?: \| (.+))?$/gm,(m,n,t)=>`<div class="fig" data-widget="${n}"><span class="tag">INTERACTIVE</span> <b>${t||''}</b></div>`)},
- async home(){const c=await Book.list();let part='',h='';
-  c.forEach(x=>{if(x.part!==part){part=x.part;h+=`<h3>${part}</h3>`}
-   h+=`<a href="chapter.html?c=${x.id}"><b>${x.title}</b><span class="badge">${x.status}</span><br><small>${x.summary}</small></a>`});
-  toc.innerHTML=h;
-  let g='graph LR\n';c.forEach(x=>{g+=` ${x.id.slice(0,2).replace(/^/,'c')}["${+x.id.slice(0,2)}. ${x.title.split(/[&,]/)[0].trim()}"]\n`;
-   x.connects.forEach(y=>g+=` c${x.id.slice(0,2)} --> c${y.slice(0,2)}\n`);g+=` click c${x.id.slice(0,2)} "chapter.html?c=${x.id}"\n`});
-  map.textContent=g;mermaid.initialize({startOnLoad:false,securityLevel:'loose'});mermaid.run({nodes:[map]})},
- async chapter(){const id=new URLSearchParams(location.search).get('c'),c=await Book.list(),i=c.findIndex(x=>x.id===id),ch=c[i];
-  if(!ch){main.textContent='Unknown chapter.';return}document.title=ch.title;
-  let body;const r=await fetch(`chapters/${id}.md`);
-  if(r.ok){const [md,s]=Book.math(Book.figs(await r.text()));body=Book.unmath(marked.parse(md),s)}
-  else{body=`<h1>${ch.title}</h1><div class="callout">Draft outline — full text coming soon.<br>${ch.summary}</div>
-   <h2>Prerequisites</h2><ul>${ch.prereq.map(p=>`<li>${p}</li>`).join('')}</ul>
-   <h2>Diagrams to build</h2>${ch.figs.map(f=>{const [a,b,d]=f.split('|').map(x=>x.trim());return `<div class="fig todo"><span class="tag">${a} · PLACEHOLDER</span><b> ${b}</b><br>${d}</div>`}).join('')}`}
-  const nx=c.slice(i+1).find(()=>1),pv=c[i-1],lk=x=>`chapter.html?c=${x.id}`;
-  const rel=ch.connects.map(k=>c.find(x=>x.id===k)).filter(Boolean).map(x=>`<a href="${lk(x)}">${x.title}</a>`).join(' · ');
-  main.innerHTML=body+(rel?`<div class="callout"><b>Leads to:</b> ${rel}</div>`:'')+`<div class="nav"><span>${pv?`<a href="${lk(pv)}">← ${pv.title}</a>`:''}</span><span>${nx?`<a href="${lk(nx)}">${nx.title} →</a>`:''}</span></div>`;
-  document.querySelectorAll('[data-widget]').forEach(el=>Widgets[el.dataset.widget]&&Widgets[el.dataset.widget](el))}
-};
+'use strict';
+
+const Book = (() => {
+  const $ = (sel) => document.querySelector(sel);
+  const esc = (s) => String(s).replace(/[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  /* ---------- Theme (light by default, remembered in localStorage) ---------- */
+  function initTheme() {
+    const btn = $('#theme-btn');
+    if (!btn) return;
+    const label = () => {
+      btn.textContent = document.documentElement.dataset.theme === 'dark' ? '☀️ Light' : '🌙 Dark';
+    };
+    label();
+    btn.addEventListener('click', () => {
+      const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      try { localStorage.setItem('theme', next); } catch (e) { /* storage blocked: ignore */ }
+      label();
+      window.dispatchEvent(new Event('themechange')); // widgets and the concept map redraw
+    });
+  }
+
+  /* ---------- Data ---------- */
+  async function loadChapters() {
+    const r = await fetch('chapters.json');
+    if (!r.ok) throw new Error('chapters.json not found');
+    return r.json();
+  }
+
+  function showError(el, err) {
+    console.error(err);
+    el.innerHTML = '<div class="err"><b>Could not load this page.</b><br>' +
+      'If you opened the file by double-clicking it, that cannot work: the book loads its chapters ' +
+      'with <code>fetch()</code>, which browsers block on <code>file://</code>. ' +
+      'Run <code>python3 -m http.server</code> in the project folder and open ' +
+      '<code>http://localhost:8000</code>, or use GitHub Pages.</div>';
+  }
+
+  /* ---------- Markdown + math pipeline ----------
+     1. Pull every $$...$$ and $...$ out of the text (marked would mangle _ and \).
+     2. Number display equations in reading order and resolve [[eq-id]] references.
+     3. Expand :::box / :::tabs / :::figure / :::widget blocks.
+     4. Run marked, then put the KaTeX-rendered math back. */
+  function extractMath(src) {
+    const stash = { display: [], inline: [] };
+    const eqNum = {};
+    let n = 0;
+
+    src = src.replace(/\$\$([\s\S]+?)\$\$(?:[ \t]*\{#([\w-]+)\})?/g, (m, tex, id) => {
+      n += 1;
+      if (id) {
+        if (eqNum[id]) console.warn('Duplicate equation id: ' + id);
+        eqNum[id] = n;
+      }
+      stash.display.push({ tex: tex.trim(), id, num: n });
+      return '\n\n@@D' + (stash.display.length - 1) + '@@\n\n';
+    });
+
+    src = src.replace(/\$([^$\n]+?)\$/g, (m, tex) => {
+      stash.inline.push(tex);
+      return '@@I' + (stash.inline.length - 1) + '@@';
+    });
+
+    src = src.replace(/\[\[([\w-]+)\]\]/g, (m, id) => {
+      if (eqNum[id]) return '<a class="eqref" href="#' + id + '">Equation (' + eqNum[id] + ')</a>';
+      console.warn('Unknown equation reference: ' + id);
+      return '<span class="bad">[unknown equation: ' + esc(id) + ']</span>';
+    });
+
+    return { src, stash };
+  }
+
+  const renderTex = (tex, display) => {
+    try { return katex.renderToString(tex, { displayMode: display, throwOnError: false }); }
+    catch (e) { return esc(tex); }
+  };
+
+  const equationBox = ({ tex, id, num }) =>
+    '<div class="math-box"' + (id ? ' id="' + id + '"' : '') + '><span></span>' +
+    '<div class="eq">' + renderTex(tex, true) + '</div>' +
+    '<span class="eqn">(' + num + ')</span></div>';
+
+  function restoreMath(html, stash) {
+    html = html.replace(/<p>\s*@@D(\d+)@@\s*<\/p>/g, (m, i) => equationBox(stash.display[i]));
+    html = html.replace(/@@D(\d+)@@/g, (m, i) => equationBox(stash.display[i]));
+    return html.replace(/@@I(\d+)@@/g, (m, i) => renderTex(stash.inline[i], false));
+  }
+
+  function expandBlocks(src) {
+    // Tabs:  :::tabs Title  /  --- Tab name  /  text ...  /  :::
+    src = src.replace(/^:::tabs[ \t]*(.*)\n([\s\S]*?)\n:::[ \t]*$/gm, (m, title, body) => {
+      const parts = body.split(/^--- (.+)$/gm); // ['', name1, text1, name2, text2, ...]
+      let bar = '', panels = '';
+      for (let k = 1; k < parts.length; k += 2) {
+        const idx = (k - 1) / 2, on = idx === 0 ? ' on' : '';
+        bar += '<button class="tab' + on + '" data-tab="' + idx + '">' + esc(parts[k]) + '</button>';
+        panels += '<div class="panel' + on + '" data-panel="' + idx + '">\n\n' + parts[k + 1].trim() + '\n\n</div>';
+      }
+      return '<div class="tabs"><div class="ct">' + esc(title) + '</div><div class="tabbar">' + bar + '</div>' + panels + '</div>';
+    });
+
+    // Boxes:  :::box step | Title  /  markdown ...  /  :::
+    src = src.replace(/^:::box[ \t]+(\w+)[ \t]*\|?[ \t]*(.*)\n([\s\S]*?)\n:::[ \t]*$/gm,
+      (m, kind, title, body) =>
+        '<div class="callout ' + esc(kind) + '"><div class="ct">' + esc(title) + '</div>\n\n' + body + '\n\n</div>');
+
+    // Placeholder figure:  :::figure F1.3 | Title | description
+    src = src.replace(/^:::figure (.+)$/gm, (m, line) => {
+      const [id, title, desc] = line.split('|').map((s) => s.trim());
+      return '<div class="fig todo"><span class="tag">' + esc(id) + ' · DIAGRAM TO BE ADDED</span><br><b>' +
+        esc(title || '') + '</b><br>' + esc(desc || '') + '</div>';
+    });
+
+    // Live widget:  :::widget name | Title
+    src = src.replace(/^:::widget (\w+)(?:[ \t]*\|[ \t]*(.+))?$/gm, (m, name, title) =>
+      '<div class="fig" data-widget="' + esc(name) + '"><span class="tag">INTERACTIVE</span> <b>' +
+      esc(title || '') + '</b></div>');
+
+    return src;
+  }
+
+  function bindTabs(root) {
+    root.querySelectorAll('.tabs').forEach((box) => {
+      box.querySelectorAll('.tab').forEach((btn) => btn.addEventListener('click', () => {
+        box.querySelectorAll('.tab, .panel').forEach((el) => el.classList.remove('on'));
+        btn.classList.add('on');
+        box.querySelector('.panel[data-panel="' + btn.dataset.tab + '"]').classList.add('on');
+      }));
+    });
+  }
+
+  /* ---------- Pages ---------- */
+  async function home() {
+    initTheme();
+    const toc = $('#toc'), map = $('#map');
+    try {
+      const chapters = await loadChapters();
+
+      let part = '', html = '';
+      chapters.forEach((c) => {
+        if (c.part !== part) { part = c.part; html += '<h3>' + esc(part) + '</h3>'; }
+        html += '<a href="chapter.html?c=' + encodeURIComponent(c.id) + '"><b>' + esc(c.title) + '</b>' +
+          '<span class="badge">' + esc(c.status) + '</span><br><small>' + esc(c.summary) + '</small></a>';
+      });
+      toc.innerHTML = html;
+
+      const node = (id) => 'c' + id.slice(0, 2);
+      let graph = 'graph LR\n';
+      chapters.forEach((c) => {
+        graph += ' ' + node(c.id) + '["' + parseInt(c.id, 10) + '. ' + c.title.split(/[&,]/)[0].trim() + '"]\n';
+        c.connects.forEach((t) => { graph += ' ' + node(c.id) + ' --> ' + node(t) + '\n'; });
+        graph += ' click ' + node(c.id) + ' "chapter.html?c=' + c.id + '"\n';
+      });
+
+      const draw = async () => {
+        const dark = document.documentElement.dataset.theme === 'dark';
+        mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: dark ? 'dark' : 'default' });
+        map.removeAttribute('data-processed');
+        map.textContent = graph;
+        await mermaid.run({ nodes: [map] });
+      };
+      window.addEventListener('themechange', draw);
+      await draw();
+    } catch (err) { showError(toc, err); }
+  }
+
+  async function chapter() {
+    initTheme();
+    const main = $('#main');
+    try {
+      const id = new URLSearchParams(location.search).get('c');
+      const chapters = await loadChapters();
+      const i = chapters.findIndex((c) => c.id === id);
+      if (i < 0) { main.innerHTML = '<p>Unknown chapter. <a href="index.html">Back to contents</a></p>'; return; }
+      const ch = chapters[i];
+      document.title = ch.title + ' · ML Notes Book';
+
+      const res = await fetch('chapters/' + ch.id + '.md');
+      let body;
+      if (res.ok) {
+        const { src, stash } = extractMath(await res.text());
+        body = restoreMath(marked.parse(expandBlocks(src)), stash);
+      } else {
+        // Outline page for chapters whose full text is not written yet
+        body = '<h1>' + esc(ch.title) + '</h1>' +
+          '<div class="callout warn"><div class="ct">Draft outline</div>Full text coming soon. ' + esc(ch.summary) + '</div>' +
+          '<h2>Prerequisites</h2><ul>' + ch.prereq.map((p) => '<li>' + esc(p) + '</li>').join('') + '</ul>' +
+          '<h2>Planned diagrams</h2>' + ch.figs.map((f) => {
+            const [fid, title, desc] = f.split('|').map((s) => s.trim());
+            return '<div class="fig todo"><span class="tag">' + esc(fid) + ' · DIAGRAM TO BE ADDED</span><br><b>' +
+              esc(title) + '</b><br>' + esc(desc) + '</div>';
+          }).join('');
+      }
+
+      const link = (c) => 'chapter.html?c=' + encodeURIComponent(c.id);
+      const leadsTo = ch.connects.map((k) => chapters.find((c) => c.id === k)).filter(Boolean)
+        .map((c) => '<a href="' + link(c) + '">' + esc(c.title) + '</a>').join(' · ');
+      const prev = chapters[i - 1], next = chapters[i + 1];
+
+      main.innerHTML = body +
+        (leadsTo ? '<div class="callout step"><div class="ct">Leads to</div>' + leadsTo + '</div>' : '') +
+        '<div class="nav"><span>' + (prev ? '<a href="' + link(prev) + '">← ' + esc(prev.title) + '</a>' : '') +
+        '</span><span>' + (next ? '<a href="' + link(next) + '">' + esc(next.title) + ' →</a>' : '') + '</span></div>';
+
+      bindTabs(main);
+      main.querySelectorAll('[data-widget]').forEach((el) => {
+        const w = Widgets[el.dataset.widget];
+        if (w) w(el); else console.warn('Missing widget: ' + el.dataset.widget);
+      });
+      if (location.hash) { const t = document.getElementById(location.hash.slice(1)); if (t) t.scrollIntoView(); }
+    } catch (err) { showError(main, err); }
+  }
+
+  return { home, chapter };
+})();

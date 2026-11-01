@@ -18,5 +18,5 @@ const Widgets={
   const mv=ev=>{if(drag){x=pos(ev);draw();ev.preventDefault()}};
   cv.onpointerdown=ev=>{drag=true;cv.setPointerCapture(ev.pointerId);mv(ev)};cv.onpointermove=mv;cv.onpointerup=()=>drag=false;
   [['λ > 0',[1.5,2.5]],['λ < 0',[-2,-1]],['λ = 0',[-1,3]],['e = 0',[4.5,1.5]]].forEach(([n,v])=>{const bt=document.createElement('button');bt.textContent=n;bt.onclick=()=>{x=v;draw()};el.append(bt)});
-  draw()}
+   addEventListener('themechange',draw);draw()}
 };
