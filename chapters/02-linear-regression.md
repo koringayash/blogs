@@ -172,7 +172,7 @@ Minimizing over more choices can only give a smaller (or equal) minimum. The old
 
 $$ \min_{\mathbf{w}\in\mathbb{R}^{p+1}} L(\mathbf{w}) \;\le\; \min_{\mathbf{w}\in\mathbb{R}^{p}} L(\mathbf{w}) $$ {#eq-more-features}
 
-:::box warn | A warning that comes with [[eq-more-features]]
+:::box warn | A warning about overfitting
 - Training error always drops as you add features, even useless ones. With $p=n$ independent features the fit passes through every training point.
 - That is the geometric root of **overfitting**. A lower training error does not mean better predictions on new data. [Chapter 4](chapter.html?c=04-bias-variance) studies exactly this.
 :::
